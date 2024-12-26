@@ -1,9 +1,11 @@
 ;;; elfeed-autotag.el --- Easy auto-tagging for elfeed -*- lexical-binding: t; -*-
 ;;
 ;; Copyright (C) 2021 Paul Elms
+;; Copyright (C) 2024 Björn Bidar
 ;; Derived from elfeed-org by Remy Honig
 ;;
 ;; Author: Paul Elms <https://paul.elms.pro>
+;; 	Björn Bidar <me@thaodan.de>
 ;; Maintainer: Paul Elms <paul@elms.pro>
 ;; Version: 0.1.1
 ;; Keywords: news
@@ -35,8 +37,6 @@
 (require 'elfeed-protocol)
 (require 'org)
 (require 'org-element)
-(require 'dash)
-(require 's)
 (require 'cl-lib)
 
 (defgroup elfeed-autotag nil
@@ -68,6 +68,26 @@
 
 (defvar elfeed-autotag--new-entry-hook nil
   "List of new-entry tagger hooks created by `elfeed-autotag'.")
+
+
+(defconst elfeed-autotag--filter-keywords
+   ;; From elfeed/README.md:: # Org-store-link and Org-capture
+   '("feed-title" ;; The title of the feed supplied by the feed
+     "feed-url" ;; The URL of the feed
+     "feed-author" ;; List of feed authors names
+     "entry-title" ;; Title of the feed
+     "entry-link" ;; Feed entry external link
+     "entry-content-type" ;; Feed entry content type as in e.g. HTML
+     "entry-enclosure" ;; The feed enclosure such as for example a preview picture
+     )
+   "List of possible keywords.")
+
+(defconst elfeed-autotag--filter-regexp
+  (regexp-opt
+   (cl-union
+    elfeed-autotag--filter-keywords
+    '("http")))
+  "Regular expression to match possible filters.")
 
 (defun elfeed-autotag--check-configuration-file (file)
   "Make sure FILE exists."
@@ -102,27 +122,27 @@ all.  Which in my opinion makes the process more traceable."
       (lambda (h)
         (let* ((current-level (org-element-property :level h))
                (delta-level (- current-level level))
-               (delta-tags (--map (intern (substring-no-properties it))
+               (delta-tags (mapcar (lambda (elmnt)(intern (substring-no-properties elmnt)))
                                   (org-element-property :tags h)))
                (heading (org-element-property :raw-value h)))
           ;; update the tags stack when we visit a parent or sibling
           (unless (> delta-level 0)
             (let ((drop-num (+ 1 (- delta-level))))
-              (setq tags (-drop drop-num tags))))
+              (setq tags (nthcdr drop-num tags))))
           ;; save current level to compare with next heading that will be visited
           (setq level current-level)
           ;; save the tags that might apply to potential children of the current heading
-          (push (-concat (-first-item tags) delta-tags) tags)
+          (push (append (car tags) delta-tags) tags)
           ;; return the heading and inherited tags
-          (-concat (list heading)
-                   (-first-item tags)))))))
+          (append (list heading)
+                   (car tags)))))))
 
 (defun elfeed-autotag--filter-relevant (list)
   "Filter relevant entries from the LIST."
-  (-filter
+  (seq-filter
    (lambda (entry)
      (and
-      (string-match "\\(http\\|entry-title\\|feed-url\\)" (car entry))
+      (string-match elfeed-autotag--filter-regexp (car entry))
       (not (member (intern elfeed-autotag-ignore-tag) entry))))
    list))
 
@@ -131,8 +151,8 @@ all.  Which in my opinion makes the process more traceable."
   (mapcar (lambda (e) (delete tree-id e)) headlines))
 
 (defun elfeed-autotag--import-headlines-from-files (files tree-id)
-  "Visit all FILES and return the headlines stored under tree tagged TREE-ID or with the \":ID:\" TREE-ID in one list."
-  (-distinct (-mapcat (lambda (file)
+  "Visit FILES and return headlines tagged or property ID containing TREE-ID."
+  (seq-uniq (seq-mapcat (lambda (file)
                         (with-current-buffer (find-file-noselect (expand-file-name file))
                           (org-mode)
                           (elfeed-autotag--cleanup-headlines
@@ -142,28 +162,33 @@ all.  Which in my opinion makes the process more traceable."
                            (intern tree-id))))
                       files)))
 
+
 (defun elfeed-autotag--convert-headline-to-tagger-params (tagger-headline)
-  "Add new entry hooks for tagging configured with the found headline in TAGGER-HEADLINE."
-  (list
-   (or
-    (when (s-starts-with? "entry-title:" (car tagger-headline))
-      (s-trim (s-chop-prefix "entry-title:" (car tagger-headline))))
-    (when (s-starts-with? "feed-url:" (car tagger-headline))
-      (s-trim (s-chop-prefix "feed-url:" (car tagger-headline)))))
-   (cdr tagger-headline)))
+  "Add new entry hooks for tags configured in TAGGER-HEADLINE."
+   (when-let* ((first-in-headline (car tagger-headline))
+               (matched-keyword (seq-find
+                                 (lambda (kw) (string-prefix-p
+                                               kw
+                                               first-in-headline))
+                                 elfeed-autotag--filter-keywords))
+               (matched-keyword (concat matched-keyword ":"))
+               (matched-keyword-parameter
+                (string-trim (string-remove-prefix
+                              matched-keyword
+                              first-in-headline))))
+     (unless (string-empty-p matched-keyword-parameter)
+       (list matched-keyword-parameter
+             (cdr tagger-headline)))))
 
-(defun elfeed-autotag--export-entry-title-hook (tagger-params)
-  "Export TAGGER-PARAMS to the proper `elfeed' structure."
+(defun elfeed-autotag--export-keyword-hook (keyword tagger-params)
+  "Make tagger for TAGGER-PARAMS WITH KEYWORD."
   (add-hook 'elfeed-autotag--new-entry-hook
             (elfeed-make-tagger
-             :entry-title (nth 0 tagger-params)
-             :add (nth 1 tagger-params))))
-
-(defun elfeed-autotag--export-feed-url-hook (tagger-params)
-  "Export TAGGER-PARAMS to the proper `elfeed' structure."
-  (add-hook 'elfeed-autotag--new-entry-hook
-            (elfeed-make-tagger
-             :feed-url (nth 0 tagger-params)
+             ;; We have to use `intern-soft' here so `keywordp'
+             ;; is true that the keyword is valid.
+             ;; `make-symbol' would not be enough as the created
+             ;; symbol has to be in the symbol table.
+             (intern-soft (concat ":" keyword)) (nth 0 tagger-params)
              :add (nth 1 tagger-params))))
 
 (defun elfeed-autotag--export-headline-hook (headline)
@@ -171,7 +196,7 @@ all.  Which in my opinion makes the process more traceable."
   (let* ((feed-url (nth 0 headline))
          (tags-and-title (cdr headline))
          (tags (if (stringp (car (last tags-and-title)))
-                   (-butlast tags-and-title)
+                   (butlast tags-and-title)
                  tags-and-title)))
     ;; TODO raw url sometimes not suitable for this function
     (add-hook 'elfeed-autotag--new-entry-hook
@@ -191,62 +216,60 @@ all.  Which in my opinion makes the process more traceable."
           (setf (elfeed-meta feed :title) (car (last headline)))
           (elfeed-meta feed :title)))))
 
-(defun elfeed-autotag--filter-entry-title-taggers (headlines)
-  "Filter tagging rules from the HEADLINES in the tree."
-  (-non-nil (-map
-             (lambda (headline)
-                (when (s-starts-with? "entry-title" (car headline)) headline))
-             headlines)))
+(defun elfeed-autotag--filter-keyword-taggers (keyword headlines)
+  "Filter tagging rules for KEYWORD from the HEADLINES in the tree."
+  (seq-filter (lambda (headline)
+                (string-prefix-p keyword (car headline)))
+             headlines))
 
-(defun elfeed-autotag--filter-feed-url-taggers (headlines)
-  "Filter tagging rules from the HEADLINES in the tree."
-  (-non-nil (-map
-             (lambda (headline)
-                (when (s-starts-with? "feed-url" (car headline)) headline))
-             headlines)))
 
 (defun elfeed-autotag--filter-subscriptions (headlines)
   "Filter subscriptions to rss feeds from the HEADLINES in the tree."
-  (-non-nil (-map
-             (lambda (headline)
-               (let* ((text (car headline))
-                      (link-and-title (s-match "^\\[\\[\\(http.+?\\)\\]\\[\\(.+?\\)\\]\\]" text))
-                      (hyperlink (s-match "^\\[\\[\\(http.+?\\)\\]\\(?:\\[.+?\\]\\)?\\]" text)))
-                 (cond ((s-starts-with? "http" text) headline)
-                       (link-and-title (-concat (list (nth 1 hyperlink))
+  (seq-filter (lambda (headline)
+                (let* ((text (car headline))
+                       (link-and-title (string-prefix-p "^\\[\\[\\(http.+?\\)\\]\\[\\(.+?\\)\\]\\]" text))
+                       (hyperlink (string-prefix-p "^\\[\\[\\(http.+?\\)\\]\\(?:\\[.+?\\]\\)?\\]" text)))
+                  (cond ((string-prefix-p "http" text) headline)
+                        (link-and-title (append (list (nth 1 hyperlink))
                                                 (cdr headline)
                                                 (list (nth 2 link-and-title))))
-                       (hyperlink (-concat (list (nth 1 hyperlink)) (cdr headline))))))
-             headlines)))
+                        (hyperlink (append (list (nth 1 hyperlink)) (cdr headline))))))
+              headlines))
+
 
 (defun elfeed-autotag--run-new-entry-hook (entry)
   "Run ENTRY through `elfeed-autotag' taggers."
-  (--each elfeed-autotag--new-entry-hook
-    (funcall it entry)))
+  (dolist (hook elfeed-autotag--new-entry-hook)
+    (funcall hook entry)))
 
 (defun elfeed-autotag-process (files tree-id)
   "Process headlines and taggers from FILES with org headlines with TREE-ID."
 
   ;; Warn if configuration files are missing
-  (-each files 'elfeed-autotag--check-configuration-file)
+  (mapc #'elfeed-autotag--check-configuration-file files)
 
   ;; Clear elfeed structures
   (setq elfeed-autotag--new-entry-hook nil)
 
   ;; Convert org structure to elfeed structure and register taggers
-  (let* ((headlines (elfeed-autotag--import-headlines-from-files files tree-id))
+  (let* ((headlines (elfeed-autotag--import-headlines-from-files
+                     files tree-id))
          (feeds (elfeed-autotag--filter-subscriptions headlines))
-         (entry-title-taggers (elfeed-autotag--filter-entry-title-taggers headlines))
-         (feed-url-taggers (elfeed-autotag--filter-feed-url-taggers headlines))
-         (entry-title-taggers (-map 'elfeed-autotag--convert-headline-to-tagger-params entry-title-taggers))
-         (feed-url-taggers (-map 'elfeed-autotag--convert-headline-to-tagger-params feed-url-taggers)))
-    (-each entry-title-taggers 'elfeed-autotag--export-entry-title-hook)
-    (-each feed-url-taggers 'elfeed-autotag--export-feed-url-hook)
-    (-each feeds 'elfeed-autotag--export-headline-hook)
-    (-each feeds 'elfeed-autotag--export-titles))
+         (keywords elfeed-autotag--filter-keywords))
+    (dolist (keyword keywords)
+      (when-let*
+          ((taggers (elfeed-autotag--filter-keyword-taggers
+                     keyword headlines))
+           (taggers (mapcar #'elfeed-autotag--convert-headline-to-tagger-params
+                            taggers)))
+        (dolist (tagger taggers)
+                  (elfeed-autotag--export-keyword-hook keyword tagger))))
+
+      (mapc #'elfeed-autotag--export-headline-hook feeds)
+      (mapc #'elfeed-autotag--export-titles feeds))
 
   (elfeed-log 'info "elfeed-autotag loaded %i rules"
-           (length elfeed-autotag--new-entry-hook)))
+              (length elfeed-autotag--new-entry-hook)))
 
 ;;;###autoload
 (defun elfeed-autotag ()
