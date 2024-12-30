@@ -271,14 +271,16 @@ all.  Which in my opinion makes the process more traceable."
   (elfeed-log 'info "elfeed-autotag loaded %i rules"
               (length elfeed-autotag--new-entry-hook)))
 
+(defun elfeed-autotag-load-before-configure ()
+  "Load all feed rules before Elfeed is started."
+  (elfeed-autotag-process elfeed-autotag-files elfeed-autotag-tree-id))
+
 ;;;###autoload
 (defun elfeed-autotag ()
   "Setup auto-tagging rules."
   (interactive)
   (elfeed-log 'info "elfeed-autotag initialized")
-  (defadvice elfeed (before configure-elfeed activate)
-    "Load all feed settings before elfeed is started."
-    (elfeed-autotag-process elfeed-autotag-files elfeed-autotag-tree-id))
+  (advice-add 'elfeed :before #'elfeed-autotag-load-before-configure)
   (add-hook 'elfeed-new-entry-hook #'elfeed-autotag--run-new-entry-hook))
 
 (provide 'elfeed-autotag)
